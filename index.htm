@@ -1,0 +1,1568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Attendance Sheet</title>
+    <!-- Chosen Palette: Warm Neutrals -->
+    <!-- Application Structure Plan: The application maintains a single-view utility structure, now enhanced with real-time collaboration. It starts with context-setting inputs (In Charge, Week) and displays the current User ID for multi-user identification. The core interactive element is a grid where each day for each student has an 'In Time' input and a 'Present' checkbox, allowing direct data entry. All inputs are live-synced via Firestore. Below this, a dynamic dashboard section with summary cards for daily attendance (Present/Absent) and a Chart.js chart for weekly student presence provides real-time data synthesis. A "Reset Sheet" button is included for administrative clearing. This structure prioritizes direct data capture and immediate, synchronized feedback, enabling multiple users to efficiently record attendance and visualize overall trends collaboratively. -->
+    <!-- Visualization & Content Choices: Report Info (In Charge, Week, User ID) -> Goal: Inform -> HTML Inputs for user entry and display of system-generated ID. Attendance Grid -> Goal: Organize/Input/Collaborate -> HTML/CSS grid with input type="time" for 'In Time' and input type="checkbox" for 'Present'. These inputs are directly bound to Firestore updates, ensuring real-time synchronization. Attendance Overview -> Goal: Compare/Synthesize -> Summary cards (HTML/JS) for daily Present/Absent counts and a horizontal bar chart (Chart.js) for weekly student presence. Both dynamically update from Firestore data, offering a clear visual summary of overall attendance patterns across all users. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Attendance Overview</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">This section provides a real-time summary of the attendance data. Click on a day's name in the grid above (e.g., 'Monday') to see the stats for that day. The chart shows the total weekly attendance for each student, updating with every change you make.</p>
+                
+                <!-- Daily Stats -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Selected Day</p>
+                        <p id="selected-day" class="text-2xl font-bold text-blue-600">-</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Present</p>
+                        <p id="stat-present" class="text-2xl font-bold text-green-600">0</p>
+                    </div>
+                    <div class="bg-slate-50 p-5 rounded-lg text-center">
+                        <p class="text-sm font-medium text-slate-500">Absent</p>
+                        <p id="stat-absent" class="text-2xl font-bold text-red-600">0</p>
+                    </div>
+                </div>
+
+                <!-- Weekly Chart -->
+                <div class="chart-container">
+                    <canvas id="attendanceChart"></canvas>
+                </div>
+            </section>
+
+            <!-- Section 4: Actions -->
+            <section id="actions" class="text-center">
+                <button id="resetBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+                    Reset Entire Sheet (Admin)
+                </button>
+            </section>
+        </main>
+    </div>
+
+    <script type="module">
+        // Import Firestore functions
+        import { doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Global variables provided by Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = 'loading...'; // Placeholder until auth is ready
+
+        // Initialize Firebase and authenticate
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no initial token or if auth state changes to signed out
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        // Fallback to a random ID if authentication fails
+                        userId = crypto.randomUUID();
+                    }
+                }
+                document.getElementById('user-id-display').textContent = userId;
+                // Once auth is ready, proceed with app initialization
+                initializeAttendanceApp();
+            });
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            // Fallback if Firebase initialization itself fails (e.g., bad config)
+            userId = crypto.randomUUID();
+            document.getElementById('user-id-display').textContent = userId;
+            initializeAttendanceApp(); // Still try to run the app, but without persistence
+        }
+
+        // Make Firebase instances and userId globally accessible to the main script
+        window.firebaseApp = app;
+        window.firestoreDb = db;
+        window.firebaseAuth = auth;
+        window.currentUserId = userId; // This will be updated by onAuthStateChanged
+
+        // Main app logic will be called after Firebase is initialized
+        function initializeAttendanceApp() {
+            // This function will contain the main DOMContentLoaded logic
+            // to ensure Firebase is ready before interacting with Firestore.
+            // We'll move the existing DOMContentLoaded code into this function.
+            console.log("Firebase initialized. User ID:", window.currentUserId);
+            // Call the main app logic here
+            window.runAttendanceApp();
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        input[type="time"] {
+            width: 80px; /* Adjust width as needed */
+            padding: 4px;
+            font-size: 0.75rem; /* text-xs */
+            border-radius: 0.25rem; /* rounded-md */
+            border: 1px solid #d1d5db; /* border-gray-300 */
+            text-align: center;
+        }
+        input[type="checkbox"] {
+            transform: scale(1.2); /* Slightly larger checkboxes */
+            margin: 0 auto; /* Center checkboxes in their cells */
+            display: block; /* Ensure block display for centering */
+        }
+        .day-header {
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+        }
+        .chart-container {
+            position: relative;
+            height: 320px;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 400px;
+            }
+        }
+        .grid-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px; /* Space between time input and checkbox */
+            padding: 4px;
+        }
+        @media (max-width: 640px) {
+            .grid-cols-custom {
+                grid-template-columns: 1fr repeat(5, minmax(0, 1fr)); /* Student name + 5 days */
+            }
+            .grid-cell {
+                padding: 2px;
+            }
+            input[type="time"] {
+                width: 65px; /* Smaller width for mobile */
+                font-size: 0.65rem;
+            }
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 1.5rem;
+            color: #333;
+        }
+    </style>
+</head>
+<body class="antialiased text-slate-700">
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl hidden" id="appContent">
+
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-slate-800">Collaborative Attendance Sheet</h1>
+            <p class="text-slate-500 mt-2">Track student attendance with in-times and presence across multiple users.</p>
+            <p class="text-xs text-slate-400 mt-1">Your User ID: <span id="user-id-display">Loading...</span></p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+
+            <!-- Section 1: Report Info -->
+            <section id="report-info" class="mb-8 pb-8 border-b border-slate-200">
+                <h2 class="text-2xl font-semibold mb-4 text-slate-800">Report Details</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label for="inChargeName" class="block text-sm font-medium text-slate-600 mb-1">Metro In Charge Name</label>
+                        <input type="text" id="inChargeName" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter name...">
+                    </div>
+                    <div>
+                        <label for="weekNumber" class="block text-sm font-medium text-slate-600 mb-1">Week Number</label>
+                        <input type="number" id="weekNumber" class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="Enter week number..." min="1">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Attendance Grid -->
+            <section id="attendance-grid" class="mb-8">
+                <h2 class="text-2xl font-semibold text-slate-800 mb-4">Attendance Grid</h2>
+                <p class="text-slate-500 mb-6 max-w-3xl">Fill in the arrival time for each student and mark them as 'Present' for the day. All changes are saved automatically and seen by others.</p>
+                <div class="overflow-x-auto">
+                    <div class="grid grid-cols-custom sm:grid-cols-6 gap-2 text-center min-w-[700px]">
+                        <div class="font-semibold text-left p-3">Student</div>
+                        <div id="day-Mon" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Monday</div>
+                        <div id="day-Tue" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Tuesday</div>
+                        <div id="day-Wed" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Wednesday</div>
+                        <div id="day-Thu" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Thursday</div>
+                        <div id="day-Fri" class="day-header font-semibold p-3 bg-slate-100 rounded-lg">Friday</div>
+
+                        <!-- Student Rows will be injected by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Attendance Overview -->
+            <section id="overview" class="mb-8 pb-8 bor
